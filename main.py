@@ -1,6 +1,3 @@
-Вот файл `main.py` как текст (копируйте отсюда):
-
-```
 import os
 import uuid
 import sqlite3
