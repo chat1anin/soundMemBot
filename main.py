@@ -15,7 +15,7 @@ ConversationHandler
 # Конфигурация
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_USER_ID = 379804537  # Замените на ваш Telegram ID
+ADMIN_USER_ID = os.getenv("ADMIN_ID")  # Замените на ваш Telegram ID
 DB_NAME = “audio_bot.db”
 
 # Состояния для ConversationHandler
