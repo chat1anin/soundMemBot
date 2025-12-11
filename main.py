@@ -12,19 +12,14 @@ filters,
 ConversationHandler
 )
 
-# Конфигурация
-
 BOT_TOKEN = os.getenv(“BOT_TOKEN”)
 ADMIN_USER_ID = int(os.getenv(“ADMIN_ID”))
 DB_NAME = “audio_bot.db”
-
-# Состояния для ConversationHandler
 
 ADD_TITLE, ADD_VOICE = range(2)
 EDIT_CHOICE, EDIT_TITLE, EDIT_VOICE = range(3, 6)
 
 class Database:
-“”“Класс для работы с базой данных”””
 
 ```
 def __init__(self, db_name):
@@ -32,11 +27,9 @@ def __init__(self, db_name):
     self.init_db()
 
 def get_connection(self):
-    """Создание подключения к БД"""
     return sqlite3.connect(self.db_name)
 
 def init_db(self):
-    """Инициализация базы данных"""
     conn = self.get_connection()
     cursor = conn.cursor()
     cursor.execute("""
@@ -53,7 +46,6 @@ def init_db(self):
     conn.close()
 
 def add_audio(self, title, file_id, duration, added_by):
-    """Добавить аудиозапись"""
     title = title.lower().strip()
     conn = self.get_connection()
     cursor = conn.cursor()
@@ -70,7 +62,6 @@ def add_audio(self, title, file_id, duration, added_by):
         conn.close()
 
 def get_all_audio(self):
-    """Получить все аудиозаписи"""
     conn = self.get_connection()
     cursor = conn.cursor()
     cursor.execute("SELECT id, title, file_id, duration FROM audio ORDER BY title")
@@ -79,7 +70,6 @@ def get_all_audio(self):
     return results
 
 def search_audio(self, query):
-    """Поиск аудиозаписей по названию"""
     query = query.lower().strip()
     conn = self.get_connection()
     cursor = conn.cursor()
@@ -92,7 +82,6 @@ def search_audio(self, query):
     return results
 
 def delete_audio(self, identifier):
-    """Удалить аудиозапись по ID или названию"""
     conn = self.get_connection()
     cursor = conn.cursor()
     
@@ -108,7 +97,6 @@ def delete_audio(self, identifier):
     return deleted > 0
 
 def get_audio_by_identifier(self, identifier):
-    """Получить аудиозапись по ID или названию"""
     conn = self.get_connection()
     cursor = conn.cursor()
     
@@ -123,7 +111,6 @@ def get_audio_by_identifier(self, identifier):
     return result
 
 def update_title(self, audio_id, new_title):
-    """Обновить название аудиозаписи"""
     new_title = new_title.lower().strip()
     conn = self.get_connection()
     cursor = conn.cursor()
@@ -138,7 +125,6 @@ def update_title(self, audio_id, new_title):
     return success
 
 def update_file(self, audio_id, new_file_id, duration):
-    """Обновить файл аудиозаписи"""
     conn = self.get_connection()
     cursor = conn.cursor()
     cursor.execute("UPDATE audio SET file_id = ?, duration = ? WHERE id = ?", 
@@ -149,7 +135,6 @@ def update_file(self, audio_id, new_file_id, duration):
     return success
 
 def get_count(self):
-    """Получить количество записей"""
     conn = self.get_connection()
     cursor = conn.cursor()
     cursor.execute("SELECT COUNT(*) FROM audio")
@@ -158,16 +143,12 @@ def get_count(self):
     return count
 ```
 
-# Инициализация базы данных
-
 db = Database(DB_NAME)
 
 def is_admin(user_id):
-“”“Проверка прав администратора”””
 return user_id == ADMIN_USER_ID
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-“”“Обработчик команды /start”””
 user = update.effective_user
 user_name = user.first_name or user.username or “друг”
 
@@ -189,7 +170,6 @@ await update.message.reply_text(message, parse_mode="Markdown")
 ```
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-“”“Обработчик команды /help”””
 user_id = update.effective_user.id
 
 ```
@@ -223,7 +203,6 @@ await update.message.reply_text(message, parse_mode="Markdown")
 ```
 
 async def add_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-“”“Начало процесса добавления аудио”””
 user_id = update.effective_user.id
 
 ```
@@ -239,7 +218,6 @@ return ADD_TITLE
 ```
 
 async def add_title(update: Update, context: ContextTypes.DEFAULT_TYPE):
-“”“Получение названия аудиозаписи”””
 title = update.message.text.strip()
 
 ```
@@ -247,7 +225,6 @@ if not title:
     await update.message.reply_text("⚠️ Название не может быть пустым. Попробуйте снова:")
     return ADD_TITLE
 
-# Сохраняем название в контекст
 context.user_data['new_audio_title'] = title.lower()
 
 await update.message.reply_text(
@@ -259,7 +236,6 @@ return ADD_VOICE
 ```
 
 async def add_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
-“”“Получение голосового сообщения”””
 if not update.message.voice:
 await update.message.reply_text(
 “⚠️ Пожалуйста, отправьте голосовое сообщение.\n”
@@ -271,7 +247,6 @@ return ADD_VOICE
 voice = update.message.voice
 title = context.user_data.get('new_audio_title')
 
-# Добавление в базу данных
 audio_id = db.add_audio(
     title=title,
     file_id=voice.file_id,
@@ -292,19 +267,16 @@ else:
         f"❌ Ошибка: аудиозапись с названием '{title}' уже существует!"
     )
 
-# Очистка контекста
 context.user_data.clear()
 return ConversationHandler.END
 ```
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-“”“Отмена операции”””
 context.user_data.clear()
 await update.message.reply_text(“❌ Операция отменена.”)
 return ConversationHandler.END
 
 async def list_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
-“”“Показать список всех аудио”””
 user_id = update.effective_user.id
 
 ```
@@ -323,7 +295,6 @@ message = f"📋 **Все аудиозаписи ({len(audio_list)}):**\n\n"
 for audio_id, title, file_id, duration in audio_list:
     message += f"🆔 {audio_id} | 📝 {title} | ⏱ {duration}с\n"
 
-# Telegram ограничивает длину сообщения
 if len(message) > 4000:
     parts = [message[i:i+4000] for i in range(0, len(message), 4000)]
     for part in parts:
@@ -333,7 +304,6 @@ else:
 ```
 
 async def delete_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
-“”“Удалить аудиозапись”””
 user_id = update.effective_user.id
 
 ```
@@ -352,14 +322,12 @@ if not context.args:
 
 identifier = " ".join(context.args)
 
-# Получаем информацию перед удалением
 audio_info = db.get_audio_by_identifier(identifier)
 
 if not audio_info:
     await update.message.reply_text(f"❌ Аудиозапись '{identifier}' не найдена в базе.")
     return
 
-# Удаляем
 if db.delete_audio(identifier):
     await update.message.reply_text(
         f"✅ Аудиозапись удалена!\n\n"
@@ -372,7 +340,6 @@ else:
 ```
 
 async def edit_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-“”“Начало процесса редактирования”””
 user_id = update.effective_user.id
 
 ```
@@ -396,7 +363,6 @@ if not audio_info:
     await update.message.reply_text(f"❌ Аудиозапись '{identifier}' не найдена в базе.")
     return ConversationHandler.END
 
-# Сохраняем информацию в контекст
 context.user_data['edit_audio_id'] = audio_info[0]
 context.user_data['edit_audio_title'] = audio_info[1]
 
@@ -415,7 +381,6 @@ return EDIT_CHOICE
 ```
 
 async def edit_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
-“”“Выбор что редактировать”””
 choice = update.message.text.strip()
 
 ```
@@ -437,7 +402,6 @@ else:
 ```
 
 async def edit_title(update: Update, context: ContextTypes.DEFAULT_TYPE):
-“”“Изменение названия”””
 new_title = update.message.text.strip().lower()
 audio_id = context.user_data.get(‘edit_audio_id’)
 
@@ -462,7 +426,6 @@ return ConversationHandler.END
 ```
 
 async def edit_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
-“”“Изменение аудиофайла”””
 if not update.message.voice:
 await update.message.reply_text(
 “⚠️ Пожалуйста, отправьте голосовое сообщение.\n”
@@ -488,17 +451,14 @@ return ConversationHandler.END
 ```
 
 async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
-“”“Обработчик inline-запросов”””
 query = update.inline_query.query.strip()
 
 ```
-# Поиск в базе данных
 if query:
     results = db.search_audio(query)
 else:
     results = db.get_all_audio()[:50]
 
-# Формирование результатов для Telegram
 inline_results = []
 
 for audio_id, title, file_id, duration in results:
@@ -510,7 +470,6 @@ for audio_id, title, file_id, duration in results:
         )
     )
 
-# Отправка результатов
 await update.inline_query.answer(
     inline_results,
     cache_time=10,
@@ -519,12 +478,9 @@ await update.inline_query.answer(
 ```
 
 def main():
-“”“Запуск бота”””
-# Создание приложения
 application = Application.builder().token(BOT_TOKEN).build()
 
 ```
-# ConversationHandler для добавления аудио
 add_handler = ConversationHandler(
     entry_points=[CommandHandler("add", add_start)],
     states={
@@ -534,7 +490,6 @@ add_handler = ConversationHandler(
     fallbacks=[CommandHandler("cancel", cancel)],
 )
 
-# ConversationHandler для редактирования аудио
 edit_handler = ConversationHandler(
     entry_points=[CommandHandler("edit", edit_start)],
     states={
@@ -545,7 +500,6 @@ edit_handler = ConversationHandler(
     fallbacks=[CommandHandler("cancel", cancel)],
 )
 
-# Регистрация обработчиков
 application.add_handler(CommandHandler("start", start))
 application.add_handler(CommandHandler("help", help_command))
 application.add_handler(add_handler)
@@ -554,7 +508,6 @@ application.add_handler(CommandHandler("del", delete_audio))
 application.add_handler(edit_handler)
 application.add_handler(InlineQueryHandler(inline_query))
 
-# Запуск бота
 print("🤖 Бот запущен!")
 print(f"📊 Аудиозаписей в базе: {db.get_count()}")
 application.run_polling(allowed_updates=Update.ALL_TYPES)
