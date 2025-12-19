@@ -1,222 +1,350 @@
+import asyncio
+import logging
 import os
-import uuid
-import sqlite3
-from telegram import Update, InlineQueryResultCachedVoice
-from telegram.ext import Application, InlineQueryHandler, MessageHandler, CommandHandler, ContextTypes, filters, ConversationHandler
+from typing import Optional, Union
+
+from aiogram import Bot, Dispatcher, F
+from aiogram.filters import Command, CommandObject
+from aiogram.types import (
+    Message,
+    InlineQuery,
+    InlineQueryResultCachedAudio,
+)
+from aiogram.enums import ParseMode
+import aiosqlite
+
+logging.basicConfig(level=logging.INFO)
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_USER_ID = int(os.getenv("ADMIN_ID")) if os.getenv("ADMIN_ID") else None
-DB_NAME = "audio_bot.db"
+ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 
-ADD_TITLE, ADD_VOICE = range(2)
-EDIT_CHOICE, EDIT_TITLE, EDIT_VOICE = range(3, 6)
+DB_PATH = "audios.db"
 
-class Database:
-    def __init__(self, db_name):
-        self.db_name = db_name
-        self.init_db()
+bot = Bot(token=BOT_TOKEN, parse_mode=ParseMode.HTML)
+dp = Dispatcher()
 
-    def get_connection(self):
-        return sqlite3.connect(self.db_name, check_same_thread=False)
 
-    def init_db(self):
-        conn = self.get_connection()
-        cursor = conn.cursor()
-        cursor.execute('''CREATE TABLE IF NOT EXISTS audio (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            title TEXT NOT NULL UNIQUE,
-            file_id TEXT NOT NULL,
-            duration INTEGER,
-            added_by INTEGER,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )''')
-        conn.commit()
-        conn.close()
+# ---------- ИНИЦИАЛИЗАЦИЯ БАЗЫ ДАННЫХ ----------
 
-    def add_audio(self, title, file_id, duration, added_by):
-        title = title.lower().strip()
-        conn = self.get_connection()
-        cursor = conn.cursor()
-        try:
-            cursor.execute("INSERT INTO audio (title, file_id, duration, added_by) VALUES (?, ?, ?, ?)",
-                           (title, file_id, duration, added_by))
-            conn.commit()
-            return cursor.lastrowid
-        except sqlite3.IntegrityError:
-            return None
-        finally:
-            conn.close()
+async def init_db():
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS audios (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                file_id TEXT NOT NULL
+            );
+            """
+        )
+        await db.commit()
 
-    def get_all_audio(self):
-        conn = self.get_connection()
-        cursor = conn.cursor()
-        cursor.execute("SELECT id, title, file_id, duration FROM audio ORDER BY title")
-        results = cursor.fetchall()
-        conn.close()
-        return results
 
-    def search_audio(self, query):
-        query = query.lower().strip()
-        conn = self.get_connection()
-        cursor = conn.cursor()
-        cursor.execute("SELECT id, title, file_id, duration FROM audio WHERE title LIKE ? ORDER BY title LIMIT 50",
-                       (f"%{query}%",))
-        results = cursor.fetchall()
-        conn.close()
-        return results
+# ---------- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ----------
 
-    def delete_audio(self, identifier):
-        conn = self.get_connection()
-        cursor = conn.cursor()
-        if identifier.isdigit():
-            cursor.execute("DELETE FROM audio WHERE id = ?", (int(identifier),))
-        else:
-            identifier = identifier.lower().strip()
-            cursor.execute("DELETE FROM audio WHERE title = ?", (identifier,))
-        deleted = cursor.rowcount > 0
-        conn.commit()
-        conn.close()
-        return deleted
+def is_admin(user_id: int) -> bool:
+    return user_id == ADMIN_ID
 
-    def get_audio_by_identifier(self, identifier):
-        conn = self.get_connection()
-        cursor = conn.cursor()
-        if identifier.isdigit():
-            cursor.execute("SELECT id, title, file_id, duration FROM audio WHERE id = ?", (int(identifier),))
-        else:
-            identifier = identifier.lower().strip()
-            cursor.execute("SELECT id, title, file_id, duration FROM audio WHERE title = ?", (identifier,))
-        result = cursor.fetchone()
-        conn.close()
-        return result
 
-    def update_title(self, audio_id, new_title):
-        new_title = new_title.lower().strip()
-        conn = self.get_connection()
-        cursor = conn.cursor()
-        try:
-            cursor.execute("UPDATE audio SET title = ? WHERE id = ?", (new_title, audio_id))
-            conn.commit()
-            return cursor.rowcount > 0
-        except sqlite3.IntegrityError:
-            return False
-        finally:
-            conn.close()
+async def get_audio_by_id_or_name(db, key: str) -> Optional[aiosqlite.Row]:
+    db.row_factory = aiosqlite.Row
+    # сначала пробуем как id
+    try:
+        audio_id = int(key)
+        cursor = await db.execute("SELECT * FROM audios WHERE id = ?", (audio_id,))
+        row = await cursor.fetchone()
+        await cursor.close()
+        if row:
+            return row
+    except ValueError:
+        pass
 
-    def update_file(self, audio_id, new_file_id, duration):
-        conn = self.get_connection()
-        cursor = conn.cursor()
-        cursor.execute("UPDATE audio SET file_id = ?, duration = ? WHERE id = ?", (new_file_id, duration, audio_id))
-        conn.commit()
-        success = cursor.rowcount > 0
-        conn.close()
-        return success
+    # потом как имя
+    key_lower = key.lower()
+    cursor = await db.execute("SELECT * FROM audios WHERE name = ?", (key_lower,))
+    row = await cursor.fetchone()
+    await cursor.close()
+    return row
 
-    def get_count(self):
-        conn = self.get_connection()
-        cursor = conn.cursor()
-        cursor.execute("SELECT COUNT(*) FROM audio")
-        count = cursor.fetchone()[0]
-        conn.close()
-        return count
 
-db = Database(DB_NAME)
+# ---------- СОСТОЯНИЯ (ПРОСТОЕ FSM НА СЛОВАРЕ) ----------
 
-def is_admin(user_id):
-    return user_id == ADMIN_USER_ID
+# Так как у тебя iPhone и без сложной инфраструктуры,
+# используем простой in-memory FSM (для одного админа нормально).
+# Если нужно, позже можно перенести на полноценный FSMStorage.
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    user_name = user.first_name or "друг"
-    await update.message.reply_text(
-        f"Привет, {user_name}!\n\n"
-        "Я бот для быстрого доступа к голосовым мемам\n\n"
-        f"Напиши в любом чате: @{context.bot.username} текст\n"
-        f"Всего аудио в базе: {db.get_count()}\n\n"
-        "/help — справка"
+user_states = {}  # user_id -> {"state": str, "data": dict}
+
+
+def set_state(user_id: int, state: Optional[str]):
+    if state is None:
+        user_states.pop(user_id, None)
+    else:
+        user_states.setdefault(user_id, {})["state"] = state
+
+
+def get_state(user_id: int) -> Optional[str]:
+    return user_states.get(user_id, {}).get("state")
+
+
+def set_data(user_id: int, key: str, value):
+    user_states.setdefault(user_id, {}).setdefault("data", {})[key] = value
+
+
+def get_data(user_id: int) -> dict:
+    return user_states.get(user_id, {}).get("data", {})
+
+
+def clear_data(user_id: int):
+    if user_id in user_states:
+        user_states[user_id]["data"] = {}
+
+
+# ---------- КОМАНДЫ ----------
+
+@dp.message(Command("start"))
+async def cmd_start(message: Message):
+    user_name = message.from_user.first_name or "друг"
+    text = (
+        f"Привет, {user_name}! 👋\n\n"
+        "Этот бот ищет аудиозаписи в inline-режиме.\n"
+        "Просто напиши <code>@имя_бота запрос</code> в любом чате.\n\n"
+        "Команда /help — краткая справка."
+    )
+    await message.answer(text)
+
+
+@dp.message(Command("help"))
+async def cmd_help(message: Message):
+    text = (
+        "<b>Возможности бота</b>\n\n"
+        "• Обычные пользователи:\n"
+        "  - Используйте inline-режим: <code>@имя_бота название</code>.\n\n"
+        "• Администратор:\n"
+        "  - /add — добавить аудиозапись\n"
+        "  - /list — список аудио\n"
+        "  - /del &lt;id или название&gt; — удалить запись\n"
+        "  - /edit &lt;id или название&gt; — редактировать запись\n"
+    )
+    await message.answer(text)
+
+
+# ---------- /add (только админ) ----------
+
+@dp.message(Command("add"))
+async def cmd_add(message: Message):
+    if not is_admin(message.from_user.id):
+        return await message.answer("Команда доступна только администратору.")
+
+    set_state(message.from_user.id, "adding_wait_audio")
+    clear_data(message.from_user.id)
+    await message.answer("Отправь аудиосообщение или аудиофайл, который нужно сохранить.")
+
+
+@dp.message(F.content_type.in_({"voice", "audio"}))
+async def handle_audio_for_add_or_edit(message: Message):
+    user_id = message.from_user.id
+    state = get_state(user_id)
+
+    # добавление новой записи
+    if state == "adding_wait_audio":
+        file_id = message.voice.file_id if message.voice else message.audio.file_id
+        set_data(user_id, "file_id", file_id)
+        set_state(user_id, "adding_wait_name")
+        await message.answer("Теперь отправь название аудио (будет сохранено в нижнем регистре).")
+        return
+
+    # редактирование аудио
+    if state == "editing_wait_audio":
+        file_id = message.voice.file_id if message.voice else message.audio.file_id
+        data = get_data(user_id)
+        data["new_file_id"] = file_id
+        set_data(user_id, "new_file_id", file_id)
+
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                "UPDATE audios SET file_id = ? WHERE id = ?",
+                (data["new_file_id"], data["audio_id"]),
+            )
+            await db.commit()
+
+        set_state(user_id, None)
+        clear_data(user_id)
+        await message.answer("Аудиофайл успешно обновлён.")
+        return
+
+
+@dp.message(F.text & (F.text.len() > 0))
+async def handle_text_states(message: Message):
+    user_id = message.from_user.id
+    state = get_state(user_id)
+
+    # добавление: получаем имя
+    if state == "adding_wait_name":
+        name = message.text.strip().lower()
+        file_id = get_data(user_id).get("file_id")
+        if not file_id:
+            await message.answer("Что-то пошло не так, попробуй /add ещё раз.")
+            set_state(user_id, None)
+            clear_data(user_id)
+            return
+
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                "INSERT INTO audios (name, file_id) VALUES (?, ?)",
+                (name, file_id),
+            )
+            await db.commit()
+
+        set_state(user_id, None)
+        clear_data(user_id)
+        await message.answer(f"Запись с именем <code>{name}</code> добавлена.")
+        return
+
+    # редактирование: новое имя
+    if state == "editing_wait_name":
+        new_name_raw = message.text.strip()
+        data = get_data(user_id)
+
+        if new_name_raw != "-":
+            new_name = new_name_raw.lower()
+            async with aiosqlite.connect(DB_PATH) as db:
+                await db.execute(
+                    "UPDATE audios SET name = ? WHERE id = ?",
+                    (new_name, data["audio_id"]),
+                )
+                await db.commit()
+            await message.answer(f"Имя обновлено на <code>{new_name}</code>.")
+
+        # Далее спрашиваем про новый файл
+        set_state(user_id, "editing_wait_audio")
+        await message.answer(
+            "Отправь новую аудиозапись (voice/audio).\n"
+            "Если менять не нужно — отправь <code>-</code> текстом."
+        )
+        return
+
+    if state == "editing_wait_audio" and message.text.strip() == "-":
+        # Оставляем старый файл
+        set_state(user_id, None)
+        clear_data(user_id)
+        await message.answer("Изменения имени применены, аудиофайл оставлен без изменений.")
+        return
+
+
+# ---------- /list (только админ) ----------
+
+@dp.message(Command("list"))
+async def cmd_list(message: Message):
+    if not is_admin(message.from_user.id):
+        return await message.answer("Команда доступна только администратору.")
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute("SELECT id, name FROM audios ORDER BY id")
+        rows = await cursor.fetchall()
+        await cursor.close()
+
+    if not rows:
+        await message.answer("Список аудио пуст.")
+        return
+
+    lines = [f"{row['id']}: {row['name']}" for row in rows]
+    text = "<b>Список аудио:</b>\n" + "\n".join(lines)
+    await message.answer(text)
+
+
+# ---------- /del (только админ) ----------
+
+@dp.message(Command("del"))
+async def cmd_del(message: Message, command: CommandObject):
+    if not is_admin(message.from_user.id):
+        return await message.answer("Команда доступна только администратору.")
+
+    if not command.args:
+        return await message.answer("Использование: /del <id или название>")
+
+    key = command.args.strip()
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        row = await get_audio_by_id_or_name(db, key)
+        if not row:
+            return await message.answer("Запись не найдена.")
+
+        await db.execute("DELETE FROM audios WHERE id = ?", (row["id"],))
+        await db.commit()
+
+    await message.answer(f"Запись <code>{row['name']}</code> (id={row['id']}) удалена.")
+
+
+# ---------- /edit (только админ) ----------
+
+@dp.message(Command("edit"))
+async def cmd_edit(message: Message, command: CommandObject):
+    if not is_admin(message.from_user.id):
+        return await message.answer("Команда доступна только администратору.")
+
+    if not command.args:
+        return await message.answer("Использование: /edit <id или название>")
+
+    key = command.args.strip()
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        row = await get_audio_by_id_or_name(db, key)
+        if not row:
+            return await message.answer("Запись не найдена.")
+
+    # сохраняем id записи в состоянии
+    set_state(message.from_user.id, "editing_wait_name")
+    clear_data(message.from_user.id)
+    set_data(message.from_user.id, "audio_id", row["id"])
+
+    await message.answer(
+        f"Редактируем запись <code>{row['name']}</code> (id={row['id']}).\n"
+        "Отправь новое имя (или <code>-</code>, чтобы оставить старое)."
     )
 
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = "Inline: @{context.bot.username} текст\n\n"
-    if is_admin(update.effective_user.id):
-        text += "Админ-команды:\n/add — добавить\n/list — список\n/del <id/название>\n/edit <id/название>"
-    await update.message.reply_text(text)
 
-async def add_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
-        await update.message.reply_text("Только админ")
-        return ConversationHandler.END
-    await update.message.reply_text("Название аудио:")
-    return ADD_TITLE
+# ---------- INLINE-РЕЖИМ ----------
 
-async def add_title(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["title"] = update.message.text.lower().strip()
-    await update.message.reply_text("Теперь голосовое:")
-    return ADD_VOICE
+@dp.inline_query()
+async def inline_handler(inline_query: InlineQuery):
+    query = (inline_query.query or "").strip().lower()
 
-async def add_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message.voice:
-        return ADD_VOICE
-    voice = update.message.voice
-    title = context.user_data["title"]
-    if db.add_audio(title, voice.file_id, voice.duration, update.effective_user.id):
-        await update.message.reply_text(f"Добавлено: {title}")
-    else:
-        await update.message.reply_text("Такое название уже есть!")
-    return ConversationHandler.END
+    results = []
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        if query:
+            cursor = await db.execute(
+                "SELECT id, name, file_id FROM audios WHERE name LIKE ? LIMIT 50",
+                (f"%{query}%",),
+            )
+        else:
+            # если запрос пустой — можно вернуть последние/популярные
+            cursor = await db.execute(
+                "SELECT id, name, file_id FROM audios ORDER BY id DESC LIMIT 10"
+            )
+        rows = await cursor.fetchall()
+        await cursor.close()
 
-async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Отменено")
-    return ConversationHandler.END
-
-async def list_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
-        return
-    audios = db.get_all_audio()
-    text = "\n".join([f"{i}. {t} ({d}с)" for i, t, _, d in audios[:50]])
-    await update.message.reply_text(text or "Пусто")
-
-async def delete_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id) or not update.message.text.split(maxsplit=1)[1:]:
-        return
-    identifier = update.message.text.split(maxsplit=1)[1]
-    if db.delete_audio(identifier):
-        await update.message.reply_text("Удалено")
-
-async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.inline_query.query.lower().strip()
-    results = db.search_audio(query) if query else db.get_all_audio()[:50]
-    inline_results = [
-        InlineQueryResultCachedVoice(
-            id=str(uuid.uuid4()),
-            voice_file_id=file_id,
-            title=title.title()
+    for row in rows:
+        results.append(
+            InlineQueryResultCachedAudio(
+                id=str(row["id"]),
+                audio_file_id=row["file_id"],
+                caption=row["name"],
+            )
         )
-        for _, title, file_id, _ in results
-    ]
-    await update.inline_query.answer(inline_results, cache_time=1)
 
-def main():
-    if not BOT_TOKEN or not ADMIN_USER_ID:
-        print("Установите BOT_TOKEN и ADMIN_ID!")
-        return
+    await inline_query.answer(results=results, cache_time=1, is_personal=False)
 
-    app = Application.builder().token(BOT_TOKEN).build()
 
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("help", help_command))
-    app.add_handler(ConversationHandler(
-        entry_points=[CommandHandler("add", add_start)],
-        states={ADD_TITLE: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_title)],
-                ADD_VOICE: [MessageHandler(filters.VOICE, add_voice)]},
-        fallbacks=[CommandHandler("cancel", cancel)]
-    ))
-    app.add_handler(CommandHandler("list", list_audio))
-    app.add_handler(CommandHandler("del", delete_audio))
-    app.add_handler(InlineQueryHandler(inline_query))
+# ---------- ЗАПУСК ----------
 
-    print("Бот запущен!")
-    app.run_polling()
+async def main():
+    await init_db()
+    await dp.start_polling(bot)
+
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
